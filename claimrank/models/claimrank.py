@@ -6,9 +6,10 @@ from allennlp.models.model import Model
 from allennlp.modules.seq2vec_encoders import Seq2VecEncoder
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
 from allennlp.nn.util import get_text_field_mask, sequence_cross_entropy_with_logits
-from allennlp.training.metrics import CategoricalAccuracy
+from allennlp.training.metrics import F1Measure
 from overrides import overrides
 import torch
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -31,7 +32,7 @@ class ClaimRank(Model):
         self.encoder = encoder
         self.hidden2score = torch.nn.Linear(in_features=3*encoder.get_output_dim(),
                                             out_features=vocab.get_vocab_size('labels'))
-        self.accuracy = CategoricalAccuracy()
+        self.f1 = F1Measure(positive_label=1)
 
     @overrides
     def forward(self,
@@ -76,17 +77,21 @@ class ClaimRank(Model):
         concat = torch.cat((sentence_encodings, property_encodings, value_encodings),
                            dim=-1)
         logits = self.hidden2score(concat)
-        out = {'score_logits': logits}
+        out = {'score_logits': logits,
+               'scores': F.softmax(logits, dim=-1)}
 
         if labels is not None:
             mask = get_text_field_mask(properties)
-            self.accuracy(logits, labels, mask)
+            self.f1(logits, labels, mask)
             out['loss'] = sequence_cross_entropy_with_logits(logits, labels, mask)
 
         return out
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
-        return {'accuracy': self.accuracy.get_metric(reset)}
-
-
+        precision, recall, f1 = self.f1.get_metric(reset)
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1
+        }
 

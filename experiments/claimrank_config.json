@@ -1,0 +1,53 @@
+{
+    "vocabulary": {
+        "max_vocab_size": { "tokens": 50000 }
+    },
+    "dataset_reader": {
+        "type": "post_modifier",
+        "tokenizer": {
+            "type": "word",
+            "word_splitter": "just_spaces",
+            "start_tokens": ["<s>"],
+            "end_tokens": ["</s>"]
+        },
+        "token_indexers": {
+            "tokens": {
+                "type": "single_id",
+                "lowercase_tokens": false
+            }
+        }
+    },
+    "train_data_path": "/home/rlogan/projects/PostModifier/dataset/mini-train.jsonl",
+    "validation_data_path": "/home/rlogan/projects/PostModifier/dataset/mini-valid.jsonl",
+    "model": {
+        "type": "claimrank",
+        "text_field_embedder": {
+            "tokens": {
+                "type": "embedding",
+                "embedding_dim": 100
+            }
+        },
+        "encoder": {
+            "type": "lstm",
+            "input_size": 100,
+            "hidden_size": 256,
+            "num_layers": 2,
+            "dropout": 0.50,
+            "bidirectional": true
+        }
+    },
+    "iterator": {
+        "type": "basic",
+        "batch_size": 64
+    },
+    "trainer": {
+        "optimizer": {
+            "type": "adam",
+            "lr": 1e-3
+        },
+        "num_epochs": 50,
+        "patience": 10,
+        "cuda_device": 0,
+        "validation_metric": "+f1"
+    }
+}

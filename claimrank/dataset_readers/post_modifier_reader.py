@@ -18,10 +18,12 @@ class PostModifierDatasetReader(DatasetReader):
     def __init__(self,
                  lazy: bool = False,
                  use_prev_sent: bool = False,
+                 use_next_sent: bool = False,
                  tokenizer: Tokenizer = None,
                  token_indexers: Dict[str, TokenIndexer] = None):
         super().__init__(lazy)
         self._use_prev_sent = use_prev_sent
+        self._use_next_sent = use_next_sent
         self._tokenizer = tokenizer or WordTokenizer()
         self._token_indexers = token_indexers or {"tokens": SingleIdTokenIndexer()}
 
@@ -31,6 +33,9 @@ class PostModifierDatasetReader(DatasetReader):
         if self._use_prev_sent:  # Concat previous sentence if using
             previous_sentence = data['previous_sentence']
             sentence = ' '.join((previous_sentence, sentence))
+        if self._use_next_sent:
+            next_sentence = data['next_sentence']
+            sentence = ' '.join((sentence, next_sentence))
         tokenized_sentence = self._tokenizer.tokenize(sentence)
         sentence_field = TextField(tokenized_sentence, self._token_indexers)
 
@@ -50,7 +55,7 @@ class PostModifierDatasetReader(DatasetReader):
         for value in values:
             tokenized_value = self._tokenizer.tokenize(value)
             value_field = TextField(tokenized_value,
-                                       self._token_indexers)
+                                    self._token_indexers)
             value_list.append(value_field)
         values_field = ListField(value_list)
 
