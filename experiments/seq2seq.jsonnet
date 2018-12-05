@@ -13,7 +13,7 @@
         "token_indexers": {
             "tokens": {
                 "type": "single_id",
-                "lowercase_tokens": true
+                "lowercase_tokens": false
             }
         }
     },
@@ -24,46 +24,46 @@
         "text_field_embedder": {
             "tokens": {
                 "type": "embedding",
-                "embedding_dim": 128
+                "embedding_dim": 500
             }
         },
         "sentence_encoder": {
             "type": "lstm",
-            "input_size": 128,
-            "hidden_size": 256,
+            "input_size": 500,
+            "hidden_size": 250,
             "num_layers": 2,
-            "dropout": 0.5,
+            "dropout": 0.3,
             "bidirectional": true
         },
         "claim_encoder": {
             "type": "lstm",
-            "input_size": 128,
-            "hidden_size": 256,
+            "input_size": 500,
+            "hidden_size": 250,
             "num_layers": 2,
-            "dropout": 0.5,
+            "dropout": 0.3,
             "bidirectional": true
         },
         "attention": {
             # Dimensions are dependent on encoder hidden sizes.
-            "vector_dim": 512,
-            "matrix_dim": 512,
+            "vector_dim": 500,
+            "matrix_dim": 500,
             "type": "bilinear",
             "normalize": false
         },
-        "decoder_embedding_dim": 128,
         "beta": 1.0
     },
     "iterator": {
         "type": "basic",
-        "batch_size": 64
+        "batch_size": 16
     },
     "trainer": {
         "optimizer": {
             "type": "adam",
-            "lr": 3e-4,
+            "lr": 1e-3,
         },
         "num_epochs": 15,
         "patience": 15,
         "cuda_device": 1,
+        "validation_metric": "+BLEU"
     }
 }

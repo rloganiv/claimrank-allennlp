@@ -10,7 +10,7 @@ from allennlp.modules.text_field_embedders import TextFieldEmbedder
 from allennlp.modules.time_distributed import TimeDistributed
 from allennlp.nn import util
 from allennlp.nn.beam_search import BeamSearch
-from allennlp.training.metrics import BLEU
+from allennlp.training.metrics import Average, BLEU
 import numpy
 from overrides import overrides
 import torch
@@ -40,15 +40,13 @@ class Seq2SeqClaimRank(Model):
         Embeds words in the source sentence / claims.
     sentence_encoder : ``Seq2VecEncoder``
         Encodes the entire source sentence into a single vector.
-    claim_encoder : ``Seq2VecEncoder``
+    claim_encoder : ``Seq2SeqEncoder``
         Encodes each claim into a single vector.
     attention : ``Attention``
         Type of attention mechanism used.
         WARNING: Do not normalize attention scores, and make sure to use a
         sigmoid activation. Otherwise the claim ranking loss will not work
         properly!
-    decoder_embedding_dim : ``int``
-        Dimension of embeddings of words in the target post-modifier.
     max_steps : ``int``
         Maximum number of decoding steps. Default: 100 (same as ONMT).
     beam_size: ``int``
@@ -60,9 +58,8 @@ class Seq2SeqClaimRank(Model):
                  vocab: Vocabulary,
                  text_field_embedder: TextFieldEmbedder,
                  sentence_encoder: Seq2VecEncoder,
-                 claim_encoder: Seq2VecEncoder,
+                 claim_encoder: Seq2SeqEncoder,
                  attention: Attention,
-                 decoder_embedding_dim: int,
                  max_steps: int = 100,
                  beam_size: int = 5,
                  beta: float = 1.0) -> None:
@@ -71,25 +68,26 @@ class Seq2SeqClaimRank(Model):
         self.text_field_embedder = text_field_embedder
         self.sentence_encoder = sentence_encoder
         self.claim_encoder = TimeDistributed(claim_encoder)  # Handles additional sequence dim
+        self.claim_encoder_dim = claim_encoder.get_output_dim()
         self.attention = attention
-        self.decoder_embedding_dim = decoder_embedding_dim
+        self.decoder_embedding_dim = text_field_embedder.get_output_dim()
         self.max_steps = max_steps
         self.beam_size = beam_size
         self.beta = beta
 
-        self.target_embedder = torch.nn.Embedding(vocab.get_vocab_size(), decoder_embedding_dim)
+        # self.target_embedder = torch.nn.Embedding(vocab.get_vocab_size(), decoder_embedding_dim)
 
         # Since we are using the sentence encoding as the initial hidden state to the decoder, the
         # decoder hidden dim must match the sentence encoder hidden dim.
         self.decoder_output_dim = sentence_encoder.get_output_dim()
-        self.decoder_cell = torch.nn.LSTMCell(decoder_embedding_dim,
+        self.decoder_cell = torch.nn.LSTMCell(self.decoder_embedding_dim + self.claim_encoder_dim,
                                               self.decoder_output_dim)
 
         # When projecting out we will use attention to combine claim embeddings into a single
         # context embedding, this will be concatenated with the decoder cell output before being
         # fed to the projection layer. Hence the expected input size is:
         #   decoder output dim + claim encoder output dim
-        projection_input_dim = self.decoder_output_dim + claim_encoder.get_output_dim()
+        projection_input_dim = self.decoder_output_dim + self.claim_encoder_dim
         self.output_projection_layer = torch.nn.Linear(projection_input_dim,
                                                        vocab.get_vocab_size())
 
@@ -99,6 +97,8 @@ class Seq2SeqClaimRank(Model):
         self.beam_search = BeamSearch(self._end_index, max_steps=max_steps, beam_size=beam_size)
         pad_index = vocab.get_token_index(vocab._padding_token)
         self.bleu = BLEU(exclude_indices={pad_index, self._start_index, self._end_index})
+        self.avg_reconstruction_loss = Average()
+        self.avg_claim_scoring_loss = Average()
 
     def take_step(self,
                   last_predictions: torch.Tensor,
@@ -170,15 +170,15 @@ class Seq2SeqClaimRank(Model):
         input_word_embeddings = self.text_field_embedder(inputs)
         input_encodings = self.sentence_encoder(input_word_embeddings, input_mask)
 
-        # Next we encode claims. Note that here we have an additional sequence dimension (since
-        # there are multiple claims per instance). To deal with this we need to set
-        # `num_wrapping_dims=1`. Also the claim encoder must be TimeDistributed.
+        # Next we encode claims. Note that here we have two additional sequence dimensions (since
+        # there are multiple claims per instance, and we want to apply attention at the word
+        # level). To deal with this we need to set `num_wrapping_dims=1` for the embedder, and make
+        # the claim encoder TimeDistributed.
         claim_mask = util.get_text_field_mask(claims, num_wrapping_dims=1)
         claim_word_embeddings = self.text_field_embedder(claims, num_wrapping_dims=1)
         claim_encodings = self.claim_encoder(claim_word_embeddings, claim_mask)
 
         # Package the encoder outputs into a state dictionary.
-        claim_mask = util.get_text_field_mask(claims)  # Don't want to count words
         state = {
             'input_mask': input_mask,
             'input_encodings': input_encodings,
@@ -238,7 +238,9 @@ class Seq2SeqClaimRank(Model):
         state['decoder_h'] = state['input_encodings']
         # Initialize LSTM context state (e.g. c_0) with zeros.
         batch_size = state['input_mask'].shape[0]
-        state['decoder_c'] = state['claim_encodings'].new_zeros(batch_size, self.decoder_output_dim)
+        state['decoder_c'] = state['input_encodings'].new_zeros(batch_size, self.decoder_output_dim)
+        # Initialize previous context.
+        state['prev_context'] = state['input_encodings'].new_zeros(batch_size, self.claim_encoder_dim)
         return state
 
     def _forward_loop(self,
@@ -275,10 +277,10 @@ class Seq2SeqClaimRank(Model):
         #   b. Mask out padding tokens - this requires taking the outer-product of the target mask
         #       and the claim mask
         attention_logit_tensor = torch.cat(attention_logit_list, dim=1)
-        attention_mask = target_mask.unsqueeze(-1) * state['claim_mask'].unsqueeze(1)
+        claim_level_mask = (state['claim_mask'].sum(-1) > 0).long()
+        attention_mask = target_mask.unsqueeze(-1) * claim_level_mask.unsqueeze(1)
         labels = labels.unsqueeze(1).repeat(1, num_decoding_steps, 1).float()
-        claim_scoring_loss = F.binary_cross_entropy_with_logits(attention_logit_tensor, labels,
-                                                                reduction='none')
+        claim_scoring_loss = F.binary_cross_entropy_with_logits(attention_logit_tensor, labels, reduction='none')
         claim_scoring_loss *= attention_mask.float()  # Apply mask
 
         # We want to apply 'batch' reduction (as is done in `sequence_cross_entropy...` which
@@ -291,8 +293,14 @@ class Seq2SeqClaimRank(Model):
 
         total_loss = reconstruction_loss + self.beta * claim_scoring_loss
 
+        # Update metrics
+        self.avg_reconstruction_loss(reconstruction_loss)
+        self.avg_claim_scoring_loss(claim_scoring_loss)
+
         output_dict =  {
             "loss": total_loss,
+            "reconstruction_loss": reconstruction_loss,
+            "claim_scoring_loss": claim_scoring_loss,
             "attention_logits": attention_logit_tensor
         }
 
@@ -302,17 +310,39 @@ class Seq2SeqClaimRank(Model):
                                     decoder_input: torch.Tensor,
                                     state: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         # Embed decoder input
-        decoder_word_embeddings = self.target_embedder(decoder_input)
+        decoder_word_embeddings = self.text_field_embedder({'tokens': decoder_input})
+
+        # Concat with previous context
+        concat = torch.cat((decoder_word_embeddings, state['prev_context']), dim=-1)
 
         # Run forward pass of decoder RNN
-        decoder_h, decoder_c = self.decoder_cell(decoder_word_embeddings, (state['decoder_h'], state['decoder_c']))
+        decoder_h, decoder_c = self.decoder_cell(concat, (state['decoder_h'], state['decoder_c']))
         state['decoder_h'] = decoder_h
         state['decoder_c'] = decoder_h
 
-        # Compute attention and get context embedding
-        attention_logits = self.attention(decoder_h, state['claim_encodings'])
-        attention_weights = torch.sigmoid(attention_logits)
-        context_embedding = util.weighted_sum(state['claim_encodings'], attention_weights)
+        # Compute attention and get context embedding. We get an attention score for each word in
+        # each claim. Then we sum up scores to get a claim level score (so we can use overlap as
+        # supervision).
+        claim_encodings = state['claim_encodings']
+        claim_mask = state['claim_mask']
+        batch_size, n_claims, claim_length, dim = claim_encodings.shape
+
+        flattened_claim_encodings = claim_encodings.view(batch_size, -1, dim)
+        flattened_claim_mask = claim_mask.view(batch_size, -1)
+        flattened_attention_logits = self.attention(decoder_h, flattened_claim_encodings, flattened_claim_mask)
+        attention_logits = flattened_attention_logits.view(batch_size, n_claims, claim_length)
+
+        # Now get claim level encodings by summing word level attention.
+        word_level_attention = util.masked_softmax(attention_logits, claim_mask)
+        claim_encodings = util.weighted_sum(claim_encodings, word_level_attention)
+
+        # We compute our context directly from the claim word embeddings
+        claim_mask = (claim_mask.sum(-1) > 0).float()
+        attention_logits = attention_logits.sum(-1)
+        attention_weights = torch.sigmoid(attention_logits) * claim_mask
+        normalized_attention_weights = attention_weights / (attention_weights.sum(-1, True) + 1e-13)
+        context_embedding = util.weighted_sum(claim_encodings, normalized_attention_weights)
+        state['prev_context'] = context_embedding
 
         # Concatenate RNN output w/ context vector and feed through final hidden layer
         projection_input = torch.cat((decoder_h, context_embedding), dim=-1)
@@ -338,7 +368,10 @@ class Seq2SeqClaimRank(Model):
 
     @overrides
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
-        all_metrics: Dict[str, float] = {}
+        all_metrics: Dict[str, float] = {
+            'recon': self.avg_reconstruction_loss.get_metric(reset=reset).data.item(),
+            'claim': self.avg_claim_scoring_loss.get_metric(reset=reset).data.item()
+        }
         # Only update BLEU score during validation and evaluation
         if not self.training:
             all_metrics.update(self.bleu.get_metric(reset=reset))
