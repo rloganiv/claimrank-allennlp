@@ -11,6 +11,7 @@ from allennlp.modules.time_distributed import TimeDistributed
 from allennlp.nn import util
 from allennlp.nn.beam_search import BeamSearch
 from allennlp.training.metrics import BLEU
+import numpy
 from overrides import overrides
 import torch
 import torch.nn.functional as F
@@ -52,6 +53,8 @@ class Seq2SeqClaimRank(Model):
         Maximum number of decoding steps. Default: 100 (same as ONMT).
     beam_size: ``int``
         Beam size used during evaluation. Default: 5 (same as ONMT).
+    beta: ``float``
+        Weight of attention loss term.
     """
     def __init__(self,
                  vocab: Vocabulary,
@@ -61,7 +64,8 @@ class Seq2SeqClaimRank(Model):
                  attention: Attention,
                  decoder_embedding_dim: int,
                  max_steps: int = 100,
-                 beam_size: int = 5) -> None:
+                 beam_size: int = 5,
+                 beta: float = 1.0) -> None:
         super(Seq2SeqClaimRank, self).__init__(vocab)
 
         self.text_field_embedder = text_field_embedder
@@ -71,6 +75,7 @@ class Seq2SeqClaimRank(Model):
         self.decoder_embedding_dim = decoder_embedding_dim
         self.max_steps = max_steps
         self.beam_size = beam_size
+        self.beta = beta
 
         self.target_embedder = torch.nn.Embedding(vocab.get_vocab_size(), decoder_embedding_dim)
 
@@ -203,6 +208,29 @@ class Seq2SeqClaimRank(Model):
 
         return output_dict
 
+    @overrides
+    def decode(self, output_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Finalize predictions.
+        """
+        predicted_indices = output_dict['predictions']
+        if not isinstance(predicted_indices, numpy.ndarray):
+            predicted_indices = predicted_indices.detach().cpu().numpy()
+        all_predicted_tokens = []
+        for indices in predicted_indices:
+            # Beam search gives us the top k results for each source sentence in the batch
+            # but we just want the single best.
+            if len(indices.shape) > 1:
+                indices = indices[0]
+            indices = list(indices)
+            # Collect indices till the first end_symbol
+            if self._end_index in indices:
+                indices = indices[:indices.index(self._end_index)]
+            predicted_tokens = [self.vocab.get_token_from_index(x) for x in indices]
+            all_predicted_tokens.append(predicted_tokens)
+        output_dict["predicted_tokens"] = all_predicted_tokens
+        return output_dict
+
     def _init_decoder_state(self,
                             state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Adds fields to the state required to initialize the decoder."""
@@ -261,7 +289,7 @@ class Seq2SeqClaimRank(Model):
             claim_scoring_loss =  claim_scoring_loss.sum(-1) / (denom.float() + 1e-13)
             denom = (denom > 0)
 
-        total_loss = reconstruction_loss + claim_scoring_loss
+        total_loss = reconstruction_loss + self.beta * claim_scoring_loss
 
         output_dict =  {
             "loss": total_loss,
