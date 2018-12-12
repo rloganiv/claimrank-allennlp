@@ -4,12 +4,8 @@
     },
     "dataset_reader": {
         "type": "post_modifier",
-        "tokenizer": {
-            "type": "word",
-            "word_splitter": "just_spaces",
-            "start_tokens": ["<s>"],
-            "end_tokens": ["</s>"]
-        },
+        "use_next_sent": true,
+        "use_prev_sent": true,
         "token_indexers": {
             "tokens": {
                 "type": "single_id",
@@ -17,8 +13,8 @@
             }
         }
     },
-    "train_data_path": "/home/rlogan/projects/PostModifier/dataset/mini-train.jsonl",
-    "validation_data_path": "/home/rlogan/projects/PostModifier/dataset/mini-valid.jsonl",
+    "train_data_path": "/home/rlogan/projects/PostModifier/dataset/train.jsonl",
+    "validation_data_path": "/home/rlogan/projects/PostModifier/dataset/valid.jsonl",
     "model": {
         "type": "claimrank",
         "text_field_embedder": {
@@ -38,16 +34,16 @@
     },
     "iterator": {
         "type": "basic",
-        "batch_size": 32
+        "batch_size": 64
     },
     "trainer": {
         "optimizer": {
             "type": "adam",
-            "lr": 1e-3
+            "lr": 1e-4
         },
         "num_epochs": 50,
-        "patience": 10,
-        "cuda_device": 0,
+        "patience": 4,
+        "cuda_device": 1,
         "validation_metric": "+f1"
     }
 }

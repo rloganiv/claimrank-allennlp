@@ -24,15 +24,19 @@ logger = logging.getLogger(__name__)
 class SequenceReader(DatasetReader):
     def __init__(self,
                  lazy: bool = False,
+                 prev: bool = False,
                  tokenizer: Tokenizer = None,
                  token_indexers: Dict[str, TokenIndexer] = None):
         super().__init__(lazy)
+        self._prev = prev
         self._tokenizer = tokenizer or WordTokenizer()
         self._token_indexers = token_indexers or {"tokens": SindleIdTokenIndexer()}
 
     def text_to_instance(self, data: Dict[str, Any]) -> Instance:
         # Tokenize input sentence
         input = data['input']
+        if self._prev:
+            input = ' '.join((data['previous_sentence'], input))
         tokenized_input = self._tokenizer.tokenize(input)
         input_field = TextField(tokenized_input, self._token_indexers)
 

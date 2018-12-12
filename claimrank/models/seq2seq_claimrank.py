@@ -80,8 +80,10 @@ class Seq2SeqClaimRank(Model):
         # Since we are using the sentence encoding as the initial hidden state to the decoder, the
         # decoder hidden dim must match the sentence encoder hidden dim.
         self.decoder_output_dim = sentence_encoder.get_output_dim()
-        self.decoder_cell = torch.nn.LSTMCell(self.decoder_embedding_dim + self.claim_encoder_dim,
-                                              self.decoder_output_dim)
+        self.decoder_0_cell = torch.nn.LSTMCell(self.decoder_embedding_dim + self.claim_encoder_dim,
+                                                self.decoder_output_dim)
+        self.decoder_1_cell = torch.nn.LSTMCell(self.decoder_output_dim,
+                                                self.decoder_output_dim)
 
         # When projecting out we will use attention to combine claim embeddings into a single
         # context embedding, this will be concatenated with the decoder cell output before being
@@ -234,11 +236,18 @@ class Seq2SeqClaimRank(Model):
     def _init_decoder_state(self,
                             state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Adds fields to the state required to initialize the decoder."""
-        # Initialize LSTM hidden state (e.g. h_0) with output of the sentence encoder.
-        state['decoder_h'] = state['input_encodings']
-        # Initialize LSTM context state (e.g. c_0) with zeros.
+
         batch_size = state['input_mask'].shape[0]
-        state['decoder_c'] = state['input_encodings'].new_zeros(batch_size, self.decoder_output_dim)
+
+        # First decoder layer gets jack (trying to approximate the structure in
+        # opennmt's graphic
+        state['decoder_0_h'] = state['input_encodings'].new_zeros(batch_size, self.decoder_output_dim)
+        state['decoder_0_c'] = state['input_encodings'].new_zeros(batch_size, self.decoder_output_dim)
+
+        # Initialize LSTM hidden state (e.g. h_0) with output of the sentence encoder.
+        state['decoder_1_h'] = state['input_encodings']
+        # Initialize LSTM context state (e.g. c_0) with zeros.
+        state['decoder_1_c'] = state['input_encodings'].new_zeros(batch_size, self.decoder_output_dim)
         # Initialize previous context.
         state['prev_context'] = state['input_encodings'].new_zeros(batch_size, self.claim_encoder_dim)
         return state
@@ -255,6 +264,7 @@ class Seq2SeqClaimRank(Model):
         # Greedy decoding phase
         output_logit_list = []
         attention_logit_list = []
+        select_idx_list = []
         for timestep in range(num_decoding_steps):
             # Feed target sequence as input
             decoder_input = target_tokens[:, timestep]
@@ -316,9 +326,12 @@ class Seq2SeqClaimRank(Model):
         concat = torch.cat((decoder_word_embeddings, state['prev_context']), dim=-1)
 
         # Run forward pass of decoder RNN
-        decoder_h, decoder_c = self.decoder_cell(concat, (state['decoder_h'], state['decoder_c']))
-        state['decoder_h'] = decoder_h
-        state['decoder_c'] = decoder_h
+        decoder_0_h, decoder_0_c = self.decoder_0_cell(concat, (state['decoder_0_h'], state['decoder_0_c']))
+        decoder_1_h, decoder_1_c = self.decoder_1_cell(decoder_0_h, (state['decoder_1_h'], state['decoder_1_c']))
+        state['decoder_0_h'] = decoder_0_h
+        state['decoder_0_c'] = decoder_0_c
+        state['decoder_1_h'] = decoder_1_h
+        state['decoder_1_c'] = decoder_1_c
 
         # Compute attention and get context embedding. We get an attention score for each word in
         # each claim. Then we sum up scores to get a claim level score (so we can use overlap as
@@ -329,12 +342,22 @@ class Seq2SeqClaimRank(Model):
 
         flattened_claim_encodings = claim_encodings.view(batch_size, -1, dim)
         flattened_claim_mask = claim_mask.view(batch_size, -1)
-        flattened_attention_logits = self.attention(decoder_h, flattened_claim_encodings, flattened_claim_mask)
+        flattened_attention_logits = self.attention(decoder_1_h, flattened_claim_encodings, flattened_claim_mask)
         attention_logits = flattened_attention_logits.view(batch_size, n_claims, claim_length)
 
         # Now get claim level encodings by summing word level attention.
         word_level_attention = util.masked_softmax(attention_logits, claim_mask)
         claim_encodings = util.weighted_sum(claim_encodings, word_level_attention)
+
+        # If not training, get max attention word to replace unk
+        if not self.training:
+            max_word = word_level_attention.argmax(dim=-1, keepdim=True)
+            gathered = word_level_attention.gather(dim=-1, index=max_word)
+            max_claim = gathered.squeeze().argmax(dim=-1, keepdim=True)
+            max_word = max_word.squeeze().gather(dim=1, index=max_claim)
+            select_idx = torch.cat((max_claim, max_word), dim=-1)
+        else:
+            select_idx = None
 
         # We compute our context directly from the claim word embeddings
         claim_mask = (claim_mask.sum(-1) > 0).float()
@@ -345,7 +368,7 @@ class Seq2SeqClaimRank(Model):
         state['prev_context'] = context_embedding
 
         # Concatenate RNN output w/ context vector and feed through final hidden layer
-        projection_input = torch.cat((decoder_h, context_embedding), dim=-1)
+        projection_input = torch.cat((decoder_1_h, context_embedding), dim=-1)
         output_logits = self.output_projection_layer(projection_input)
 
         return output_logits, attention_logits, state
