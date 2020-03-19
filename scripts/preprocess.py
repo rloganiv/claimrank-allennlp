@@ -14,7 +14,7 @@ csv.field_size_limit(sys.maxsize)
 
 WIKI_FIELDS = ['id', 'name', 'aliases', 'descriptions', 'claims']
 PM_FIELDS = ['input', 'name', 'target', 'sentence', 'id', 'previous_sentence',
-             'next_sentence', 'file']
+             'next_sentence', 'score', 'file']
 
 
 def insert_postmod_token(sentence, post_modifier):
