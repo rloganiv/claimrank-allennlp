@@ -67,7 +67,7 @@ pyaml==17.12.1
 pyasn1==0.4.4
 pycparser==2.19
 pycryptodome==3.7.0
-Pygments==2.2.0
+Pygments==2.7.4
 pyparsing==2.3.0
 pytest==3.10.0
 python-dateutil==2.7.5
